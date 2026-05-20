@@ -1,6 +1,6 @@
 # Binaries
 bin/
-dashboard
+/dashboard
 dashboard-vps
 vps-dashboard-bin
 
