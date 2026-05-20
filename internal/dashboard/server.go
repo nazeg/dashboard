@@ -677,7 +677,7 @@ func startPocketbaseService(id string, port int, adminEmail, adminPassword strin
 
 		go func() {
 			time.Sleep(2 * time.Second)
-			exec.Command(executable, "admin", "create", adminEmail, adminPassword, "--dir="+dataDir).Run()
+			exec.Command(executable, "superuser", "upsert", adminEmail, adminPassword, "--dir="+dataDir).Run()
 		}()
 		return nil
 	}
@@ -721,7 +721,7 @@ WantedBy=multi-user.target
 
 	go func() {
 		time.Sleep(3 * time.Second)
-		exec.Command(executable, "admin", "create", adminEmail, adminPassword, "--dir="+dataDir).Run()
+		exec.Command(executable, "superuser", "upsert", adminEmail, adminPassword, "--dir="+dataDir).Run()
 	}()
 
 	return nil
