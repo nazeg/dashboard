@@ -30,15 +30,23 @@ if ! command -v node &> /dev/null; then
 fi
 
 # 3. Projenin Klonlanması
-echo "-> Proje GitHub'dan çekiliyor..."
-rm -rf /root/dashboard-install
-git clone https://github.com/nazeg/dashboard.git /root/dashboard-install
-cd /root/dashboard-install
+if [ ! -d "/root/dashboard-src" ]; then
+  echo "-> Proje GitHub'dan klonlanıyor..."
+  git clone https://github.com/nazeg/dashboard.git /root/dashboard-src
+  cd /root/dashboard-src
+else
+  echo "-> Proje güncelleniyor (git pull)..."
+  cd /root/dashboard-src
+  # Bekleyen yerel değişiklikler varsa temizle
+  git reset --hard
+  git pull
+fi
 
 # 4. Klasör Yapısının Hazırlanması
 echo "-> Gerekli klasörler oluşturuluyor..."
 mkdir -p /var/lib/dashboard/databases
 mkdir -p /var/www
+mkdir -p /root/dashboard
 
 # 5. Frontend Derleme (Build)
 echo "-> Frontend bağımlılıkları yükleniyor ve derleniyor..."
@@ -49,13 +57,11 @@ cd ..
 
 # 6. Backend Derleme (Build)
 echo "-> Backend derleniyor..."
-/snap/bin/go build -o /root/dashboard-install/vps-dashboard-bin .
+/snap/bin/go build -o /root/dashboard/dashboard .
 
-# 7. Çalıştırılabilir Dosyayı Taşıma
-echo "-> Uygulama taşınıyor..."
-mkdir -p /root/dashboard
-mv /root/dashboard-install/vps-dashboard-bin /root/dashboard/dashboard
-rm -rf /root/dashboard-install
+# 7. Geçici dosyalar temizleniyor
+echo "-> Temizlik yapılıyor..."
+# Kaynak klasörü silmiyoruz, böylece bir sonraki güncellemede sadece git pull yapılabilir.
 
 # 8. Systemd Servisi Oluşturma
 echo "-> Arka plan servisi oluşturuluyor..."
