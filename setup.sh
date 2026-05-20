@@ -142,12 +142,19 @@ install_go() {
   local GO_VERSION
   GO_VERSION=$(get_latest_go_version)
   echo "  → Go $GO_VERSION indiriliyor..." >> "$LOG_FILE"
+
+  # Eski Go kurulumlarını temizle (snap, apt, manuel)
+  snap remove go 2>/dev/null || true
+  apt-get remove -y golang-go 2>/dev/null || true
   rm -rf /usr/local/go
+  rm -f /usr/bin/go /usr/local/bin/go /usr/bin/gofmt /usr/local/bin/gofmt
+
   curl -L -o /tmp/go.tar.gz "https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz"
   tar -C /usr/local -xzf /tmp/go.tar.gz
   rm -f /tmp/go.tar.gz
   ln -sf /usr/local/go/bin/go /usr/bin/go
   ln -sf /usr/local/go/bin/gofmt /usr/bin/gofmt
+  hash -r 2>/dev/null || true
 }
 
 # -- AKIŞ BAŞLANGICI --
@@ -190,8 +197,8 @@ cd /root/nazploy-src
 REQUIRED_GO=$(sed -n 's/^go \([0-9][0-9.]*\).*/\1/p' /root/nazploy-src/go.mod | head -1)
 
 INSTALLED_GO=""
-if command -v go &> /dev/null; then
-  INSTALLED_GO=$(go version | sed -n 's/.*go\([0-9][0-9.]*\).*/\1/p' | head -1)
+if [ -x /usr/local/go/bin/go ]; then
+  INSTALLED_GO=$(/usr/local/go/bin/go version | sed -n 's/.*go\([0-9][0-9.]*\).*/\1/p' | head -1)
 fi
 
 if [ -z "$INSTALLED_GO" ]; then
@@ -226,8 +233,7 @@ run_step "Geçici dosyalar temizleniyor (disk alanı açılıyor)" bash -c "rm -
 # 7. Backend Derleme (Build)
 export GOTOOLCHAIN=local
 export GOFLAGS="-trimpath"
-GO_BIN=$(command -v go || echo "/usr/local/go/bin/go")
-run_step "Backend Go uygulaması derleniyor" "$GO_BIN" build -o /root/nazploy/nazploy .
+run_step "Backend Go uygulaması derleniyor" /usr/local/go/bin/go build -o /root/nazploy/nazploy .
 
 # 8. Systemd Servisi Oluşturma
 create_systemd_service() {
