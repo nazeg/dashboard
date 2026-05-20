@@ -640,9 +640,13 @@ func startPocketbaseService(id string, port int, adminEmail, adminPassword strin
 	dataDir := fmt.Sprintf("/var/lib/dashboard/databases/%s", id)
 	os.MkdirAll(dataDir, 0755)
 
-	executable, err := os.Executable()
-	if err != nil {
-		executable = "pocketbase"
+	executable := "/root/dashboard/pocketbase_bin"
+	if _, err := os.Stat(executable); os.IsNotExist(err) {
+		var errExe error
+		executable, errExe = os.Executable()
+		if errExe != nil {
+			executable = "pocketbase"
+		}
 	}
 
 	serviceName := fmt.Sprintf("pocketbase-%s", id)

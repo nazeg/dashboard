@@ -48,6 +48,16 @@ mkdir -p /var/lib/dashboard/databases
 mkdir -p /var/www
 mkdir -p /root/dashboard
 
+# Resmi PocketBase v0.30.2 temiz binary indirme (alt database örnekleri için)
+if [ ! -f "/root/dashboard/pocketbase_bin" ]; then
+  echo "-> PocketBase temiz resmi binary indiriliyor..."
+  curl -L -o /tmp/pb.zip https://github.com/pocketbase/pocketbase/releases/download/v0.30.2/pocketbase_0.30.2_linux_amd64.zip
+  unzip -o /tmp/pb.zip pocketbase -d /tmp/
+  mv /tmp/pocketbase /root/dashboard/pocketbase_bin
+  chmod +x /root/dashboard/pocketbase_bin
+  rm -f /tmp/pb.zip
+fi
+
 # 5. Frontend Derleme (Build)
 echo "-> Frontend bağımlılıkları yükleniyor ve derleniyor..."
 cd web
