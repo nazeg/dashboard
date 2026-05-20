@@ -76,9 +76,9 @@ print_system_diagnostics() {
     echo -e "  💾 ${CYAN}Boş Disk Alanı (Root):${NC} Bilinmiyor"
   fi
 
-  # Public IP Info
-  PUBLIC_IP=$(curl -s --max-time 3 https://ipinfo.io/ip || echo "Bilinmiyor")
-  echo -e "  🆔 ${CYAN}Sunucu IP Adresi:${NC} $PUBLIC_IP"
+  # Local IP detection
+  LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
+  echo -e "  🆔 ${CYAN}Sunucu IP Adresi:${NC} $LOCAL_IP"
   echo ""
 }
 
@@ -98,6 +98,16 @@ run_step() {
   fi
 }
 
+install_go() {
+  local GO_VERSION="1.22.3"
+  rm -rf /usr/local/go
+  curl -L -o /tmp/go.tar.gz "https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz"
+  tar -C /usr/local -xzf /tmp/go.tar.gz
+  rm -f /tmp/go.tar.gz
+  ln -sf /usr/local/go/bin/go /usr/bin/go
+  ln -sf /usr/local/go/bin/gofmt /usr/bin/gofmt
+}
+
 # --- AKIŞ BAŞLANGICI ---
 clear
 print_banner
@@ -107,11 +117,11 @@ echo -e "🚀 ${BOLD}Kurulum Başlatılıyor...${NC}"
 
 # 2. Bağımlılıkların Kurulumu
 run_step "Sistem paket listesi güncelleniyor (apt update)" apt-get update
-run_step "Temel sistem bağımlılıkları yükleniyor" apt-get install -y nginx certbot python3-certbot-nginx git curl unzip snapd
+run_step "Temel sistem bağımlılıkları yükleniyor" apt-get install -y nginx certbot python3-certbot-nginx git curl unzip
 
 # Go Kurulumu
 if ! command -v go &> /dev/null; then
-  run_step "Go programlama dili snap ile kuruluyor" snap install go --classic
+  run_step "Go programlama dili kuruluyor (tar.gz)" install_go
 else
   echo -e "  ✔️  ${GREEN}Go programlama dili zaten kurulu${NC} ($(go version | awk '{print $3}'))"
 fi
@@ -188,12 +198,12 @@ run_step "Systemd servis yapılandırması oluşturuluyor" create_systemd_servic
 run_step "Servisler etkinleştiriliyor ve başlatılıyor" bash -c "systemctl daemon-reload && systemctl enable nazploy && systemctl restart nazploy"
 
 # 10. Bitiş Ekranı
-PUBLIC_IP=$(curl -s --max-time 3 https://ipinfo.io/ip || echo "SUNUCU_IP")
+LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "SUNUCU_IP")
 echo ""
 echo -e "${GREEN}${BOLD}========================================================${NC}"
 echo -e "🎉 ${GREEN}${BOLD}KURULUM BAŞARIYLA TAMAMLANDI!${NC}"
 echo -e "🚀 Nazploy başarıyla kuruldu ve arka planda başlatıldı."
-echo -e "🌐 Yönetim Paneli Adresi: ${CYAN}${BOLD}http://${PUBLIC_IP}:8090${NC}"
+echo -e "🌐 Yönetim Paneli Adresi: ${CYAN}${BOLD}http://${LOCAL_IP}:8090${NC}"
 echo -e "${GREEN}${BOLD}========================================================${NC}"
 echo ""
 echo -e "${YELLOW}${BOLD}Servis Durumu (journalctl):${NC}"
