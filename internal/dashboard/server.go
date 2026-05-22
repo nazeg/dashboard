@@ -856,7 +856,14 @@ func startPocketbaseService(id string, port int, adminEmail, adminPassword strin
 			}
 		}
 
-		cmd := exec.Command(executable, "serve", "--dir="+dataDir, fmt.Sprintf("--http=%s:%d", host, port))
+		args := []string{"serve", "--dir=" + dataDir, fmt.Sprintf("--http=%s:%d", host, port)}
+		migrationsDir := filepath.Join(dataDir, "pb_migrations")
+		if info, err := os.Stat(migrationsDir); err == nil && info.IsDir() {
+			args = append(args, "--migrationsDir="+migrationsDir)
+			log.Printf("[PocketBase] Migrations dizini bulundu: %s", migrationsDir)
+		}
+
+		cmd := exec.Command(executable, args...)
 		err := cmd.Start()
 		if err != nil {
 			log.Printf("Failed to start pocketbase locally: %v", err)
@@ -887,6 +894,14 @@ func startPocketbaseService(id string, port int, adminEmail, adminPassword strin
 	}
 
 	serviceName := fmt.Sprintf("pocketbase-%s", id)
+
+	execStartCmd := fmt.Sprintf("%s serve --dir=%s --http=%s:%d", executable, dataDir, host, port)
+	migrationsDir := filepath.Join(dataDir, "pb_migrations")
+	if info, err := os.Stat(migrationsDir); err == nil && info.IsDir() {
+		execStartCmd += " --migrationsDir=" + migrationsDir
+		log.Printf("[PocketBase] Systemd servisine migrationsDir eklendi: %s", migrationsDir)
+	}
+
 	serviceFileContent := fmt.Sprintf(`[Unit]
 Description=PocketBase Service for %s
 After=network.target
@@ -895,12 +910,12 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=%s
-ExecStart=%s serve --dir=%s --http=%s:%d
+ExecStart=%s
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
-`, id, dataDir, executable, dataDir, host, port)
+`, id, dataDir, execStartCmd)
 
 	servicePath := fmt.Sprintf("/etc/systemd/system/%s.service", serviceName)
 	if err := os.WriteFile(servicePath, []byte(serviceFileContent), 0644); err != nil {
@@ -930,6 +945,44 @@ func stopAndRemovePocketbaseService(id string) {
 	servicePath := fmt.Sprintf("/etc/systemd/system/%s.service", serviceName)
 	os.Remove(servicePath)
 	runCommand("systemctl", "daemon-reload")
+}
+
+func restartPocketbaseService(id string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	serviceName := fmt.Sprintf("pocketbase-%s", id)
+	dataDir := fmt.Sprintf("/var/lib/dashboard/databases/%s", id)
+
+	// Regenerate service file with --migrationsDir if migrations exist
+	migrationsDir := filepath.Join(dataDir, "pb_migrations")
+	if info, err := os.Stat(migrationsDir); err == nil && info.IsDir() {
+		servicePath := fmt.Sprintf("/etc/systemd/system/%s.service", serviceName)
+		if existing, err := os.ReadFile(servicePath); err == nil {
+			content := string(existing)
+			// Only update if --migrationsDir is not already in the service file
+			if !strings.Contains(content, "--migrationsDir=") {
+				content = strings.Replace(content,
+					"Restart=always",
+					fmt.Sprintf("# migrationsDir added automatically\nEnvironment=PB_MIGRATIONS_DIR=%s\nRestart=always", migrationsDir),
+					1)
+				// Find and update ExecStart line to include --migrationsDir
+				lines := strings.Split(content, "\n")
+				for i, line := range lines {
+					if strings.HasPrefix(strings.TrimSpace(line), "ExecStart=") && !strings.Contains(line, "--migrationsDir=") {
+						lines[i] = strings.TrimRight(line, "\r\n") + " --migrationsDir=" + migrationsDir
+					}
+				}
+				content = strings.Join(lines, "\n")
+				os.WriteFile(servicePath, []byte(content), 0644)
+				runCommand("systemctl", "daemon-reload")
+				log.Printf("[PocketBase] Servis dosyası güncellendi (migrationsDir eklendi): %s", serviceName)
+			}
+		}
+	}
+
+	log.Printf("[PocketBase] Servis yeniden başlatılıyor (migrations için): %s", serviceName)
+	runCommand("systemctl", "restart", serviceName)
 }
 
 func killProcessOnPort(port int) {

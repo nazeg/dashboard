@@ -242,6 +242,25 @@ func CloneAndBuild(app core.App, siteID string) error {
 			return fmt.Errorf("dosya kopyalama başarısız: %w", err)
 		}
 
+		// ── PocketBase migration support ──
+		// Copy pb_migrations from the cloned repo to the PocketBase data directory.
+		// This must happen inside runBuild while cloneDir still exists (before defer cleanup).
+		pbMigSrc := filepath.Join(cloneDir, "pb_migrations")
+		if info, err := os.Stat(pbMigSrc); err == nil && info.IsDir() {
+			rec, _ := app.FindRecordById("sites", siteID)
+			if rec != nil && rec.GetString("site_type") == "pocketbase" {
+				dbDir := filepath.Join("/var/lib/dashboard/databases", siteID)
+				pbMigDst := filepath.Join(dbDir, "pb_migrations")
+				os.MkdirAll(pbMigDst, 0755)
+
+				if err := copyDir(pbMigSrc, pbMigDst); err != nil {
+					logWrite("pb_migrations kopyalama hatası: %v", err)
+				} else {
+					logWrite("pb_migrations kopyalandı → %s", pbMigDst)
+				}
+			}
+		}
+
 		logWrite("Deploy başarıyla tamamlandı!")
 		return nil
 	}
@@ -250,6 +269,16 @@ func CloneAndBuild(app core.App, siteID string) error {
 		logWrite("Hata: %v", err)
 		updateSiteStatus("failed", logBuf.String())
 		return err
+	}
+
+	// If migrations were copied, restart PocketBase service so they are applied
+	rec, _ := app.FindRecordById("sites", siteID)
+	if rec != nil && rec.GetString("site_type") == "pocketbase" {
+		dbDir := filepath.Join("/var/lib/dashboard/databases", siteID)
+		pbMigDir := filepath.Join(dbDir, "pb_migrations")
+		if info, err := os.Stat(pbMigDir); err == nil && info.IsDir() {
+			restartPocketbaseService(siteID)
+		}
 	}
 
 	updateSiteStatus("ready", logBuf.String())
