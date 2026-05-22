@@ -97,7 +97,7 @@ func main() {
 
 		// Port management
 		g.GET("/ports/next", func(e *core.RequestEvent) error {
-			return dashboard.HandleNextPort(e, pm)
+			return dashboard.HandleNextPort(e, app, pm)
 		})
 
 		// Nginx status

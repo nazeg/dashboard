@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"sync"
+
+	"github.com/pocketbase/pocketbase/core"
 )
 
 // PortManager manages port allocation across the system
@@ -18,15 +20,44 @@ func NewPortManager() *PortManager {
 	}
 }
 
-func (pm *PortManager) Next() (int, error) {
+func (pm *PortManager) Next(app core.App) (int, error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
+	// Get all used ports from database
+	dbPorts := make(map[int]bool)
+
+	// Sites ports
+	if siteRecords, err := app.FindAllRecords("sites"); err == nil {
+		for _, rec := range siteRecords {
+			port := rec.GetInt("port")
+			if port > 0 {
+				dbPorts[port] = true
+			}
+		}
+	}
+
+	// Databases ports
+	if dbRecords, err := app.FindAllRecords("databases"); err == nil {
+		for _, rec := range dbRecords {
+			port := rec.GetInt("port")
+			if port > 0 {
+				dbPorts[port] = true
+			}
+		}
+	}
+
 	// Scan for available ports in real-time
 	for port := PortRangeStart; port <= PortRangeEnd; port++ {
+		// Skip if used in DB
+		if dbPorts[port] {
+			continue
+		}
+		// Skip if reserved in-memory during this session
 		if pm.used[port] {
 			continue
 		}
+		// Skip if actually occupied on the host system
 		if !pm.isPortInUse(port) {
 			pm.used[port] = true
 			return port, nil

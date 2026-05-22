@@ -45,7 +45,7 @@ func HandleCreateSite(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 	if req.Port != 0 {
 		port = req.Port
 	} else {
-		port, err = pm.Next()
+		port, err = pm.Next(app)
 		if err != nil {
 			return e.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
@@ -102,7 +102,7 @@ func HandleCreateSite(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 			return e.JSON(http.StatusBadRequest, map[string]string{"error": "admin email is required for pocketbase site"})
 		}
 		// Allocate second port for PocketBase process
-		bp, err := pm.Next()
+		bp, err := pm.Next(app)
 		if err != nil {
 			if req.Port == 0 {
 				pm.Release(port)
@@ -640,7 +640,7 @@ func HandleCreateDatabase(e *core.RequestEvent, app *pocketbase.PocketBase, pm *
 	}
 
 	// Allocate port
-	port, err := pm.Next()
+	port, err := pm.Next(app)
 	if err != nil {
 		return e.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -716,8 +716,8 @@ func HandleDeleteDatabase(e *core.RequestEvent, app *pocketbase.PocketBase, pm *
 
 // ── Ports ──
 
-func HandleNextPort(e *core.RequestEvent, pm *PortManager) error {
-	port, err := pm.Next()
+func HandleNextPort(e *core.RequestEvent, app *pocketbase.PocketBase, pm *PortManager) error {
+	port, err := pm.Next(app)
 	if err != nil {
 		return e.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
