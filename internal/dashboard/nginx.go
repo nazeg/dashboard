@@ -154,7 +154,61 @@ const nginxPocketbaseSite = `server {
     root {{.RootDir}};
     index index.html index.htm;
 
-    location ~ ^/(api|_) {
+    # Protect PocketBase Admin UI
+    location ~ ^/_/ {
+        set $pb_admin_allowed "0";
+        if ($arg_key = "{{.SiteID}}") {
+            set $pb_admin_allowed "1";
+        }
+        if ($cookie_pb_admin_auth_{{.SiteID}} = "{{.SiteID}}") {
+            set $pb_admin_allowed "1";
+        }
+        
+        if ($pb_admin_allowed = "0") {
+            return 404;
+        }
+
+        if ($arg_key = "{{.SiteID}}") {
+            add_header Set-Cookie "pb_admin_auth_{{.SiteID}}={{.SiteID}}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax" always;
+            return 302 $scheme://$http_host$uri;
+        }
+
+        proxy_pass {{.ProxyURL}};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    # Protect PocketBase Admin API
+    location ~ ^/api/admins/ {
+        if ($cookie_pb_admin_auth_{{.SiteID}} != "{{.SiteID}}") {
+            return 404;
+        }
+
+        proxy_pass {{.ProxyURL}};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    # Public PocketBase API endpoints
+    location ~ ^/api/ {
         proxy_pass {{.ProxyURL}};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -190,7 +244,61 @@ const nginxPocketbaseSiteSSL = `server {
     root {{.RootDir}};
     index index.html index.htm;
 
-    location ~ ^/(api|_) {
+    # Protect PocketBase Admin UI
+    location ~ ^/_/ {
+        set $pb_admin_allowed "0";
+        if ($arg_key = "{{.SiteID}}") {
+            set $pb_admin_allowed "1";
+        }
+        if ($cookie_pb_admin_auth_{{.SiteID}} = "{{.SiteID}}") {
+            set $pb_admin_allowed "1";
+        }
+        
+        if ($pb_admin_allowed = "0") {
+            return 404;
+        }
+
+        if ($arg_key = "{{.SiteID}}") {
+            add_header Set-Cookie "pb_admin_auth_{{.SiteID}}={{.SiteID}}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax" always;
+            return 302 $scheme://$http_host$uri;
+        }
+
+        proxy_pass {{.ProxyURL}};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    # Protect PocketBase Admin API
+    location ~ ^/api/admins/ {
+        if ($cookie_pb_admin_auth_{{.SiteID}} != "{{.SiteID}}") {
+            return 404;
+        }
+
+        proxy_pass {{.ProxyURL}};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    # Public PocketBase API endpoints
+    location ~ ^/api/ {
         proxy_pass {{.ProxyURL}};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

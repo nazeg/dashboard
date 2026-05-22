@@ -137,6 +137,7 @@ func HandleCreateSite(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 		RootDir:  rootDir,
 		SiteType: req.SiteType,
 		ProxyURL: proxyURL,
+		SiteID:   record.Id,
 	})
 	if err != nil {
 		return e.JSON(http.StatusInternalServerError, map[string]string{"error": "nginx config gen: " + err.Error()})
@@ -282,6 +283,7 @@ func HandleUpdateSite(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 			SiteType: record.GetString("site_type"),
 			ProxyURL: record.GetString("proxy_url"),
 			SSLEntry: sslEntry,
+			SiteID:   record.Id,
 		})
 		if err != nil {
 			return e.JSON(http.StatusOK, map[string]interface{}{
@@ -399,6 +401,7 @@ func HandleDeploySite(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 		SiteType: record.GetString("site_type"),
 		ProxyURL: record.GetString("proxy_url"),
 		SSLEntry: sslEntry,
+		SiteID:   record.Id,
 	})
 	if err != nil {
 		return e.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -564,6 +567,7 @@ func HandleEnableSSL(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngin
 			SiteType: record.GetString("site_type"),
 			ProxyURL: record.GetString("proxy_url"),
 			SSLEntry: &SSLEntry{CertPath: result.CertPath, KeyPath: result.KeyPath},
+			SiteID:   record.Id,
 		})
 		if err != nil {
 			return
@@ -600,6 +604,7 @@ func HandleDisableSSL(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 		RootDir:  record.GetString("root_dir"),
 		SiteType: record.GetString("site_type"),
 		ProxyURL: record.GetString("proxy_url"),
+		SiteID:   record.Id,
 	})
 	if err != nil {
 		return e.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})

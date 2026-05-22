@@ -664,7 +664,7 @@ export default function SiteDetail() {
               )}
               {site.site_type === 'pocketbase' && (
                 <a
-                  href={`http://${site.domain}:${site.port}/_/`}
+                  href={site.ssl_status === 'active' ? `https://${site.domain}/_/?key=${site.id}` : `http://${site.domain}:${site.port}/_/?key=${site.id}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className={`block w-full text-center bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors ${

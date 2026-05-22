@@ -132,6 +132,7 @@ type NginxConfigInput struct {
 	ProxyURL   string
 	SSLEntry   *SSLEntry
 	ConfigPath string
+	SiteID     string
 }
 
 type SSLEntry struct {
