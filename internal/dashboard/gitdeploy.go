@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -95,29 +96,23 @@ func DetectFramework(projectDir string) FrameworkInfo {
 	}
 }
 
-// dbLogWriter writes build logs to a memory buffer and periodically updates PocketBase.
-type dbLogWriter struct {
-	app        core.App
-	siteID     string
-	logBuf     *bytes.Buffer
-	lastUpdate time.Time
+// safeLogBuffer is a thread-safe bytes.Buffer wrapper that writes to server stdout as well.
+type safeLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
 }
 
-func (w *dbLogWriter) Write(p []byte) (n int, err error) {
-	n, err = w.logBuf.Write(p)
-	// Write to server stdout for terminal logs
-	os.Stdout.Write(p)
+func (s *safeLogBuffer) Write(p []byte) (n int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	os.Stdout.Write(p) // Print to console for server stdout logs
+	return s.buf.Write(p)
+}
 
-	// Update DB with intermediate logs, throttled to once every 1 second
-	if time.Since(w.lastUpdate) > 1000*time.Millisecond {
-		w.lastUpdate = time.Now()
-		rec, fetchErr := w.app.FindRecordById("sites", w.siteID)
-		if fetchErr == nil {
-			rec.Set("git_log", w.logBuf.String())
-			_ = w.app.Save(rec)
-		}
-	}
-	return
+func (s *safeLogBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
 }
 
 // ── Clone & Build ──
@@ -180,18 +175,11 @@ func CloneAndBuild(app core.App, siteID string) error {
 		}
 	}
 
-	var logBuf bytes.Buffer
-	writer := &dbLogWriter{
-		app:        app,
-		siteID:     siteID,
-		logBuf:     &logBuf,
-		lastUpdate: time.Now(),
-	}
-
+	var safeBuf safeLogBuffer
 	logWrite := func(format string, args ...interface{}) {
 		msg := fmt.Sprintf(format, args...)
 		log.Printf("[GitDeploy] %s", msg)
-		writer.Write([]byte(msg + "\n"))
+		safeBuf.Write([]byte(msg + "\n"))
 	}
 
 	updateSiteStatus := func(status string, logs string) {
@@ -205,7 +193,28 @@ func CloneAndBuild(app core.App, siteID string) error {
 
 	// Set status to deploying
 	logWrite("Deploy işlemi başlatıldı. Site: %s (%s)", record.GetString("name"), record.GetString("domain"))
-	updateSiteStatus("deploying", logBuf.String())
+	updateSiteStatus("deploying", safeBuf.String())
+
+	// Channel to stop background log writer
+	logDone := make(chan struct{})
+
+	// Start background log writer goroutine (updates DB every 2 seconds throttled)
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-logDone:
+				return
+			case <-ticker.C:
+				rec, fetchErr := app.FindRecordById("sites", siteID)
+				if fetchErr == nil {
+					rec.Set("git_log", safeBuf.String())
+					_ = app.Save(rec)
+				}
+			}
+		}
+	}()
 
 	// Run main build logic inside a wrapper to handle error and log writing
 	runBuild := func() error {
@@ -234,8 +243,8 @@ func CloneAndBuild(app core.App, siteID string) error {
 
 		cmd := exec.Command("git", args...)
 		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-		cmd.Stdout = writer
-		cmd.Stderr = writer
+		cmd.Stdout = &safeBuf
+		cmd.Stderr = &safeBuf
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("git clone başarısız: %w", err)
 		}
@@ -262,8 +271,8 @@ func CloneAndBuild(app core.App, siteID string) error {
 			logWrite("npm install çalıştırılıyor...")
 			installCmd := exec.Command("npm", "install", "--prefer-offline", "--no-audit", "--no-fund")
 			installCmd.Dir = cloneDir
-			installCmd.Stdout = writer
-			installCmd.Stderr = writer
+			installCmd.Stdout = &safeBuf
+			installCmd.Stderr = &safeBuf
 			if err := installCmd.Run(); err != nil {
 				return fmt.Errorf("npm install başarısız: %w", err)
 			}
@@ -276,8 +285,8 @@ func CloneAndBuild(app core.App, siteID string) error {
 			}
 			buildExec := exec.Command(parts[0], parts[1:]...)
 			buildExec.Dir = cloneDir
-			buildExec.Stdout = writer
-			buildExec.Stderr = writer
+			buildExec.Stdout = &safeBuf
+			buildExec.Stderr = &safeBuf
 
 			// For Next.js static export, set output: 'export' env hint
 			if framework.Name == "nextjs" {
@@ -318,7 +327,6 @@ func CloneAndBuild(app core.App, siteID string) error {
 
 		// ── PocketBase migration support ──
 		// Copy pb_migrations from the cloned repo to the PocketBase data directory.
-		// This must happen inside runBuild while cloneDir still exists (before defer cleanup).
 		pbMigSrc := filepath.Join(cloneDir, "pb_migrations")
 		if info, err := os.Stat(pbMigSrc); err == nil && info.IsDir() {
 			rec, _ := app.FindRecordById("sites", siteID)
@@ -339,10 +347,15 @@ func CloneAndBuild(app core.App, siteID string) error {
 		return nil
 	}
 
-	if err := runBuild(); err != nil {
-		logWrite("Hata: %v", err)
-		updateSiteStatus("failed", logBuf.String())
-		return err
+	buildErr := runBuild()
+
+	// Stop background DB writer goroutine
+	close(logDone)
+
+	if buildErr != nil {
+		logWrite("Hata: %v", buildErr)
+		updateSiteStatus("failed", safeBuf.String())
+		return buildErr
 	}
 
 	// If migrations were copied, restart PocketBase service so they are applied
@@ -355,7 +368,7 @@ func CloneAndBuild(app core.App, siteID string) error {
 		}
 	}
 
-	updateSiteStatus("ready", logBuf.String())
+	updateSiteStatus("ready", safeBuf.String())
 	return nil
 }
 
