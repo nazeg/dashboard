@@ -12,6 +12,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,10 +22,131 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
 )
+
+// Secure random key generated at startup for state JWT signing
+var githubAppSecret = make([]byte, 32)
+var domainRegex = regexp.MustCompile(`^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]$`)
+
+func init() {
+	_, _ = rand.Read(githubAppSecret)
+}
+
+func isValidDomain(domain string) bool {
+	domain = strings.TrimSpace(domain)
+	if domain == "" || len(domain) > 253 {
+		return false
+	}
+	// Must match domain regex
+	if !domainRegex.MatchString(domain) {
+		return false
+	}
+	// Prevent directory traversal or template injection characters in domain
+	if strings.ContainsAny(domain, "\r\n\t'\"`$;<>|{}()[]") {
+		return false
+	}
+	return true
+}
+
+func isValidProxyURL(proxyURL string) bool {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return true
+	}
+	// Reject newlines or control characters to prevent header injection
+	if strings.ContainsAny(proxyURL, "\r\n\t'\"`$;<>|") {
+		return false
+	}
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		return false
+	}
+	// Scheme must be http or https
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return false
+	}
+	// Host must not be empty
+	if parsed.Host == "" {
+		return false
+	}
+	return true
+}
+
+func generateRandomSecret(length int) string {
+	b := make([]byte, length)
+	if _, err := rand.Read(b); err != nil {
+		return generateRandomID()
+	}
+	return hex.EncodeToString(b)
+}
+
+func isPortInUse(app *pocketbase.PocketBase, port int, excludeSiteID string) bool {
+	records, err := app.FindAllRecords("sites", dbx.NewExp("port = {:port}", dbx.Params{"port": port}))
+	if err != nil || len(records) == 0 {
+		return false
+	}
+	if excludeSiteID != "" {
+		for _, rec := range records {
+			if rec.Id != excludeSiteID {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+func validateSiteRecord(app *pocketbase.PocketBase, record *core.Record) error {
+	name := record.GetString("name")
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("site adı boş olamaz")
+	}
+
+	domain := record.GetString("domain")
+	if !isValidDomain(domain) {
+		return fmt.Errorf("geçersiz domain formatı")
+	}
+
+	port := record.GetInt("port")
+	if port < PortRangeStart || port > PortRangeEnd {
+		return fmt.Errorf("port %d ile %d arasında olmalıdır", PortRangeStart, PortRangeEnd)
+	}
+
+	if isPortInUse(app, port, record.Id) {
+		return fmt.Errorf("port %d zaten başka bir site tarafından kullanılıyor", port)
+	}
+
+	siteType := record.GetString("site_type")
+	if siteType != SiteTypeStatic && siteType != SiteTypeProxy && siteType != SiteTypePocketbase {
+		return fmt.Errorf("geçersiz site tipi: %s", siteType)
+	}
+
+	status := record.GetString("status")
+	if status != SiteStatusActive && status != SiteStatusPaused {
+		return fmt.Errorf("geçersiz site durumu: %s", status)
+	}
+
+	if siteType == SiteTypeProxy {
+		pURL := record.GetString("proxy_url")
+		if pURL == "" {
+			return fmt.Errorf("Proxy sitesi için proxy_url zorunludur")
+		}
+		if !isValidProxyURL(pURL) {
+			return fmt.Errorf("geçersiz proxy url formatı")
+		}
+	} else if siteType == SiteTypePocketbase {
+		pURL := record.GetString("proxy_url")
+		if pURL != "" && !isValidProxyURL(pURL) {
+			return fmt.Errorf("geçersiz proxy url formatı")
+		}
+	}
+
+	return nil
+}
 
 // ── Sites ──
 
@@ -53,6 +175,23 @@ func HandleCreateSite(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 			host = host[:idx]
 		}
 		domain = host
+	}
+
+	if !isValidDomain(domain) {
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "domain formatı geçersiz"})
+	}
+
+	if req.SiteType == SiteTypeProxy {
+		if req.ProxyURL == "" {
+			return e.JSON(http.StatusBadRequest, map[string]string{"error": "Proxy sitesi için proxy_url zorunludur"})
+		}
+		if !isValidProxyURL(req.ProxyURL) {
+			return e.JSON(http.StatusBadRequest, map[string]string{"error": "proxy_url formatı geçersiz"})
+		}
+	} else if req.ProxyURL != "" {
+		if !isValidProxyURL(req.ProxyURL) {
+			return e.JSON(http.StatusBadRequest, map[string]string{"error": "proxy_url formatı geçersiz"})
+		}
 	}
 
 	// Determine port (either manual or auto-allocated)
@@ -96,6 +235,7 @@ func HandleCreateSite(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 		record.Set("build_cmd", req.BuildCmd)
 		record.Set("output_dir", req.OutputDir)
 		record.Set("git_status", "idle")
+		record.Set("webhook_secret", generateRandomSecret(32))
 	}
 
 	// Create web root (site name slug + record ID)
@@ -138,6 +278,17 @@ func HandleCreateSite(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 		record.Set("admin_email", req.AdminEmail)
 		record.Set("admin_password", adminPass)
 		record.Set("proxy_url", proxyURL)
+	}
+
+	if err := validateSiteRecord(app, record); err != nil {
+		if req.Port == 0 {
+			pm.Release(port)
+		}
+		if backendPort > 0 {
+			pm.Release(backendPort)
+		}
+		os.RemoveAll(rootDir)
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
 	if err := app.Save(record); err != nil {
@@ -233,6 +384,9 @@ func HandleUpdateSite(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 			}
 			newDomain = host
 		}
+		if !isValidDomain(newDomain) {
+			return e.JSON(http.StatusBadRequest, map[string]string{"error": "domain formatı geçersiz"})
+		}
 		if newDomain != oldDomain {
 			record.Set("domain", newDomain)
 			domainChanged = true
@@ -245,7 +399,13 @@ func HandleUpdateSite(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 		record.Set("site_type", *req.SiteType)
 	}
 	if req.ProxyURL != nil {
-		record.Set("proxy_url", *req.ProxyURL)
+		pURL := strings.TrimSpace(*req.ProxyURL)
+		if pURL != "" {
+			if !isValidProxyURL(pURL) {
+				return e.JSON(http.StatusBadRequest, map[string]string{"error": "proxy_url formatı geçersiz"})
+			}
+		}
+		record.Set("proxy_url", pURL)
 	}
 	if req.Status != nil {
 		record.Set("status", *req.Status)
@@ -255,6 +415,9 @@ func HandleUpdateSite(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 	}
 	if req.GitRepo != nil {
 		record.Set("git_repo", *req.GitRepo)
+		if *req.GitRepo != "" && record.GetString("webhook_secret") == "" {
+			record.Set("webhook_secret", generateRandomSecret(32))
+		}
 	}
 	if req.GitBranch != nil {
 		record.Set("git_branch", *req.GitBranch)
@@ -265,11 +428,17 @@ func HandleUpdateSite(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *Ngi
 	if req.OutputDir != nil {
 		record.Set("output_dir", *req.OutputDir)
 	}
+
 	if req.GitStatus != nil {
 		record.Set("git_status", *req.GitStatus)
 	}
 	if req.GitLog != nil {
 		record.Set("git_log", *req.GitLog)
+	}
+
+	// Validate final configuration state before saving
+	if err := validateSiteRecord(app, record); err != nil {
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
 	if err := app.Save(record); err != nil {
@@ -525,26 +694,28 @@ func HandleGithubWebhook(e *core.RequestEvent, app *pocketbase.PocketBase, ngx *
 
 	// Verify webhook secret (HMAC-SHA256 signature)
 	secret := record.GetString("webhook_secret")
-	if secret != "" {
-		sigHeader := e.Request.Header.Get("X-Hub-Signature-256")
-		if sigHeader == "" {
-			return e.JSON(http.StatusUnauthorized, map[string]string{"error": "missing signature"})
-		}
+	if secret == "" {
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "Webhook secret has not been configured. Please save the site settings again to generate one."})
+	}
 
-		body, err := io.ReadAll(e.Request.Body)
-		if err != nil {
-			return e.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to read body"})
-		}
-		// Re-set body so BindBody can read it again
-		e.Request.Body = io.NopCloser(bytes.NewReader(body))
+	sigHeader := e.Request.Header.Get("X-Hub-Signature-256")
+	if sigHeader == "" {
+		return e.JSON(http.StatusUnauthorized, map[string]string{"error": "missing signature"})
+	}
 
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write(body)
-		expectedSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	body, err := io.ReadAll(e.Request.Body)
+	if err != nil {
+		return e.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to read body"})
+	}
+	// Re-set body so BindBody can read it again
+	e.Request.Body = io.NopCloser(bytes.NewReader(body))
 
-		if !hmac.Equal([]byte(expectedSig), []byte(sigHeader)) {
-			return e.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
-		}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	expectedSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	if !hmac.Equal([]byte(expectedSig), []byte(sigHeader)) {
+		return e.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
 	}
 
 	// Read GitHub event type
@@ -1159,15 +1330,42 @@ func generateRandomID() string {
 // and redirects the user to install the application.
 func HandleGithubCallback(e *core.RequestEvent, app *pocketbase.PocketBase) error {
 	code := e.Request.URL.Query().Get("code")
-	if code == "" {
-		return e.String(http.StatusBadRequest, "Missing code parameter")
-	}
+	state := e.Request.URL.Query().Get("state")
 
 	scheme := "http"
 	if e.Request.TLS != nil || e.Request.Header.Get("X-Forwarded-Proto") == "https" {
 		scheme = "https"
 	}
 	redirectHost := scheme + "://" + e.Request.Host
+
+	if code == "" {
+		return e.Redirect(http.StatusTemporaryRedirect, redirectHost+"/settings?github_error=missing_code")
+	}
+	if state == "" {
+		return e.Redirect(http.StatusTemporaryRedirect, redirectHost+"/settings?github_error=missing_state")
+	}
+
+	// Verify state token signature
+	token, err := jwt.Parse(state, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return githubAppSecret, nil
+	})
+
+	if err != nil || !token.Valid {
+		return e.Redirect(http.StatusTemporaryRedirect, redirectHost+"/settings?github_error=invalid_state")
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return e.Redirect(http.StatusTemporaryRedirect, redirectHost+"/settings?github_error=invalid_state_claims")
+	}
+
+	userID, ok := claims["user_id"].(string)
+	if !ok || userID == "" {
+		return e.Redirect(http.StatusTemporaryRedirect, redirectHost+"/settings?github_error=invalid_user_in_state")
+	}
 
 	// Exchange code for app manifest details
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -1193,12 +1391,11 @@ func HandleGithubCallback(e *core.RequestEvent, app *pocketbase.PocketBase) erro
 		return e.Redirect(http.StatusTemporaryRedirect, redirectHost+"/settings?github_error=decode_failed")
 	}
 
-	// Save to superusers
-	superusers, err := app.FindAllRecords("_superusers")
-	if err != nil || len(superusers) == 0 {
-		return e.String(http.StatusInternalServerError, "Superuser record not found")
+	// Save to specific superuser
+	su, err := app.FindRecordById("_superusers", userID)
+	if err != nil {
+		return e.Redirect(http.StatusTemporaryRedirect, redirectHost+"/settings?github_error=superuser_not_found")
 	}
-	su := superusers[0]
 	su.Set("github_app_id", fmt.Sprintf("%d", conversion.ID))
 	su.Set("github_app_client_id", conversion.ClientID)
 	su.Set("github_app_client_secret", conversion.ClientSecret)
@@ -1414,6 +1611,37 @@ func HandleGetGithubAppStatus(e *core.RequestEvent, app *pocketbase.PocketBase) 
 }
 
 // HandleDisconnectGithubApp clears GitHub App settings.
+// HandleGenerateGithubState generates a short-lived state token (JWT) to secure the GitHub App registration callback
+func HandleGenerateGithubState(e *core.RequestEvent, app *pocketbase.PocketBase) error {
+	var userID string
+	if e.Auth != nil {
+		userID = e.Auth.Id
+	} else {
+		superusers, err := app.FindAllRecords("_superusers")
+		if err == nil && len(superusers) > 0 {
+			userID = superusers[0].Id
+		}
+	}
+
+	if userID == "" {
+		return e.JSON(http.StatusUnauthorized, map[string]string{"error": "Yetkisiz erişim"})
+	}
+
+	now := time.Now()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"user_id": userID,
+		"exp":     now.Add(10 * time.Minute).Unix(),
+		"iat":     now.Unix(),
+	})
+
+	stateToken, err := token.SignedString(githubAppSecret)
+	if err != nil {
+		return e.JSON(http.StatusInternalServerError, map[string]string{"error": "State token üretilemedi"})
+	}
+
+	return e.JSON(http.StatusOK, map[string]string{"state": stateToken})
+}
+
 func HandleDisconnectGithubApp(e *core.RequestEvent, app *pocketbase.PocketBase) error {
 	superusers, err := app.FindAllRecords("_superusers")
 	if err != nil || len(superusers) == 0 {
@@ -1445,27 +1673,29 @@ func HandleGithubAppWebhook(e *core.RequestEvent, app *pocketbase.PocketBase, ng
 
 	webhookSecret := superuser.GetString("github_app_webhook_secret")
 
-	// Verify signature if secret is configured
-	if webhookSecret != "" {
-		sigHeader := e.Request.Header.Get("X-Hub-Signature-256")
-		if sigHeader == "" {
-			return e.JSON(http.StatusUnauthorized, map[string]string{"error": "missing signature"})
-		}
+	// Verify signature strictly (must be configured)
+	if webhookSecret == "" {
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "GitHub App webhook secret is not configured"})
+	}
 
-		body, err := io.ReadAll(e.Request.Body)
-		if err != nil {
-			return e.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to read body"})
-		}
-		// Restore body
-		e.Request.Body = io.NopCloser(bytes.NewReader(body))
+	sigHeader := e.Request.Header.Get("X-Hub-Signature-256")
+	if sigHeader == "" {
+		return e.JSON(http.StatusUnauthorized, map[string]string{"error": "missing signature"})
+	}
 
-		mac := hmac.New(sha256.New, []byte(webhookSecret))
-		mac.Write(body)
-		expectedSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	body, err := io.ReadAll(e.Request.Body)
+	if err != nil {
+		return e.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to read body"})
+	}
+	// Restore body
+	e.Request.Body = io.NopCloser(bytes.NewReader(body))
 
-		if !hmac.Equal([]byte(expectedSig), []byte(sigHeader)) {
-			return e.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
-		}
+	mac := hmac.New(sha256.New, []byte(webhookSecret))
+	mac.Write(body)
+	expectedSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	if !hmac.Equal([]byte(expectedSig), []byte(sigHeader)) {
+		return e.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
 	}
 
 	event := e.Request.Header.Get("X-GitHub-Event")

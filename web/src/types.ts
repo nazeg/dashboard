@@ -18,6 +18,7 @@ export interface Site {
   git_status?: 'idle' | 'deploying' | 'ready' | 'failed'
   git_log?: string
   notes?: string
+  webhook_secret?: string
   created: string
   updated: string
 }

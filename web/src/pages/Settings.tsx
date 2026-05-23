@@ -29,6 +29,7 @@ export default function Settings() {
     webhook_url?: string
   } | null>(null)
   const [appLoading, setAppLoading] = useState(true)
+  const [githubState, setGithubState] = useState('')
 
   const fetchAppStatus = async () => {
     try {
@@ -41,8 +42,18 @@ export default function Settings() {
     }
   }
 
+  const fetchGithubState = async () => {
+    try {
+      const res = await pb.send('/api/dashboard/github/generate-state', { method: 'POST' })
+      setGithubState(res.state)
+    } catch (err) {
+      console.error('GitHub App state generation failed:', err)
+    }
+  }
+
   useEffect(() => {
     fetchAppStatus()
+    fetchGithubState()
 
     const params = new URLSearchParams(window.location.search)
     if (params.get('github_app_installed')) {
@@ -80,6 +91,7 @@ export default function Settings() {
     url: origin,
     redirect_url: `${origin}/api/public/github/callback`,
     setup_url: `${origin}/settings?github_app_installed=true`,
+    state: githubState,
     hook_attributes: {
       url: `${origin}/api/public/github/webhook`
     },

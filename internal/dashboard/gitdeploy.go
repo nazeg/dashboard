@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -115,6 +117,20 @@ func (s *safeLogBuffer) String() string {
 	return s.buf.String()
 }
 
+// createSecureCommand returns a command configured to run under a non-root user (deployUser) if possible, using sudo -E.
+func createSecureCommand(deployUser string, dir string, name string, args ...string) *exec.Cmd {
+	var cmd *exec.Cmd
+	// Only wrap with sudo on Linux when a valid non-root deployUser is provided
+	if runtime.GOOS == "linux" && deployUser != "" && deployUser != "root" {
+		sudoArgs := append([]string{"-E", "-u", deployUser, "--", name}, args...)
+		cmd = exec.Command("sudo", sudoArgs...)
+	} else {
+		cmd = exec.Command(name, args...)
+	}
+	cmd.Dir = dir
+	return cmd
+}
+
 // ── Clone & Build ──
 
 // CloneAndBuild clones a GitHub repo, detects the framework, builds it,
@@ -149,14 +165,12 @@ func CloneAndBuild(app core.App, siteID string) error {
 	if superuser != nil {
 		appID := superuser.GetString("github_app_id")
 		appPem := superuser.GetString("github_app_pem")
-		isAppToken := false
 		if appID != "" && appPem != "" {
 			owner, _, parseErr := ParseGithubOwnerAndRepo(repo)
 			if parseErr == nil {
 				instToken, tokenErr := GetInstallationTokenForRepo(appID, appPem, owner)
 				if tokenErr == nil {
 					githubToken = instToken
-					isAppToken = true
 				} else {
 					log.Printf("[GitDeploy] GitHub App token alma hatası (PAT denenecek): %v", tokenErr)
 				}
@@ -164,15 +178,14 @@ func CloneAndBuild(app core.App, siteID string) error {
 				log.Printf("[GitDeploy] GitHub sahibi ayrıştırılamadı: %v", parseErr)
 			}
 		}
+	}
 
-		// Rewrite GitHub URL to include token if present
-		if githubToken != "" && strings.HasPrefix(repo, "https://github.com/") {
-			if isAppToken {
-				repo = strings.Replace(repo, "https://github.com/", fmt.Sprintf("https://x-access-token:%s@github.com/", githubToken), 1)
-			} else {
-				repo = strings.Replace(repo, "https://github.com/", fmt.Sprintf("https://%s@github.com/", githubToken), 1)
-			}
-		}
+	// Setup environment variables securely (passing token via GIT_CONFIG_PARAMETERS to prevent leakage)
+	gitEnv := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if githubToken != "" && strings.HasPrefix(repo, "https://github.com/") {
+		authString := "x-access-token:" + githubToken
+		base64Auth := base64.StdEncoding.EncodeToString([]byte(authString))
+		gitEnv = append(gitEnv, "GIT_CONFIG_PARAMETERS=http.https://github.com/.extraHeader=Authorization: Basic "+base64Auth)
 	}
 
 	var safeBuf safeLogBuffer
@@ -225,6 +238,15 @@ func CloneAndBuild(app core.App, siteID string) error {
 		}
 		defer os.RemoveAll(tmpDir)
 
+		deployUser := os.Getenv("DEPLOY_USER")
+		if deployUser != "" && deployUser != "root" && runtime.GOOS == "linux" {
+			// Change ownership of the temp directory to the deploy user so they can write inside it
+			chownCmd := exec.Command("chown", "-R", deployUser, tmpDir)
+			if err := chownCmd.Run(); err != nil {
+				logWrite("[Warning] Geçici dizin sahipliği değiştirilemedi: %v", err)
+			}
+		}
+
 		cloneDir := filepath.Join(tmpDir, "repo")
 
 		// Clone (shallow, specific branch if provided)
@@ -241,11 +263,11 @@ func CloneAndBuild(app core.App, siteID string) error {
 		}
 		args = append(args, repo, cloneDir)
 
-		cmd := exec.Command("git", args...)
-		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		cmd := createSecureCommand(deployUser, tmpDir, "git", args...)
+		cmd.Env = gitEnv
 		cmd.Stdout = &safeBuf
 		cmd.Stderr = &safeBuf
-		if err := cmd.Run(); err != nil {
+		if err := runCommandWithTimeout(cmd, 5*time.Minute); err != nil {
 			return fmt.Errorf("git clone başarısız: %w", err)
 		}
 
@@ -269,11 +291,10 @@ func CloneAndBuild(app core.App, siteID string) error {
 		if _, err := os.Stat(pkgPath); err == nil {
 			// Install dependencies
 			logWrite("npm install çalıştırılıyor...")
-			installCmd := exec.Command("npm", "install", "--prefer-offline", "--no-audit", "--no-fund")
-			installCmd.Dir = cloneDir
+			installCmd := createSecureCommand(deployUser, cloneDir, "npm", "install", "--prefer-offline", "--no-audit", "--no-fund")
 			installCmd.Stdout = &safeBuf
 			installCmd.Stderr = &safeBuf
-			if err := installCmd.Run(); err != nil {
+			if err := runCommandWithTimeout(installCmd, 10*time.Minute); err != nil {
 				return fmt.Errorf("npm install başarısız: %w", err)
 			}
 
@@ -283,17 +304,24 @@ func CloneAndBuild(app core.App, siteID string) error {
 			if len(parts) == 0 {
 				return fmt.Errorf("geçersiz build komutu")
 			}
-			buildExec := exec.Command(parts[0], parts[1:]...)
-			buildExec.Dir = cloneDir
+
+			// Command Allowlist Validation
+			if !isCommandAllowed(parts[0]) {
+				return fmt.Errorf("güvenlik hatası: '%s' komutunu çalıştırmaya yetkiniz yok. Sadece izin verilen build araçları kullanılabilir", parts[0])
+			}
+
+			buildExec := createSecureCommand(deployUser, cloneDir, parts[0], parts[1:]...)
 			buildExec.Stdout = &safeBuf
 			buildExec.Stderr = &safeBuf
 
+			// Set/append environment variables
+			buildExec.Env = os.Environ()
 			// For Next.js static export, set output: 'export' env hint
 			if framework.Name == "nextjs" {
-				buildExec.Env = append(os.Environ(), "NEXT_OUTPUT=export")
+				buildExec.Env = append(buildExec.Env, "NEXT_OUTPUT=export")
 			}
 
-			if err := buildExec.Run(); err != nil {
+			if err := runCommandWithTimeout(buildExec, 10*time.Minute); err != nil {
 				return fmt.Errorf("build başarısız (%s): %w", buildCmd, err)
 			}
 		} else {
@@ -303,7 +331,10 @@ func CloneAndBuild(app core.App, siteID string) error {
 		}
 
 		// Determine source directory
-		srcDir := filepath.Join(cloneDir, outputDir)
+		srcDir, err := safeJoin(cloneDir, outputDir)
+		if err != nil {
+			return fmt.Errorf("geçersiz çıktı dizini: %w", err)
+		}
 		if _, err := os.Stat(srcDir); os.IsNotExist(err) {
 			// Fallback: if output dir doesn't exist, copy the whole repo
 			logWrite("Output dizini '%s' bulunamadı, tüm repo kopyalanıyor...", outputDir)
@@ -323,6 +354,11 @@ func CloneAndBuild(app core.App, siteID string) error {
 		logWrite("Build çıktısı kopyalanıyor: %s → %s", srcDir, targetDir)
 		if err := copyDir(srcDir, targetDir); err != nil {
 			return fmt.Errorf("dosya kopyalama başarısız: %w", err)
+		}
+
+		if deployUser != "" && deployUser != "root" && runtime.GOOS == "linux" {
+			// Change ownership of the target directory back to the deploy user
+			_ = exec.Command("chown", "-R", deployUser, targetDir).Run()
 		}
 
 		// ── PocketBase migration support ──
@@ -563,4 +599,77 @@ func GetInstallationTokenForRepo(appID string, pem string, owner string) (string
 
 	return tokenResp.Token, nil
 }
+
+// isCommandAllowed checks if the given command is in the list of allowed build utilities
+func isCommandAllowed(cmdName string) bool {
+	// Clean the command name
+	cmdName = strings.TrimSpace(cmdName)
+
+	// Reject path separators to prevent running local/arbitrary binaries (e.g. ./npm or /tmp/npm)
+	if strings.ContainsAny(cmdName, "/\\") || strings.HasPrefix(cmdName, ".") {
+		return false
+	}
+
+	// Normalize if it contains windows extension
+	base := strings.TrimSuffix(cmdName, ".exe")
+
+	allowed := map[string]bool{
+		"npm":    true,
+		"yarn":   true,
+		"pnpm":   true,
+		"bun":    true,
+		"npx":    true,
+		"node":   true,
+		"gatsby": true,
+		"next":   true,
+		"astro":  true,
+		"vite":   true,
+		"hugo":   true,
+		"jekyll": true,
+		"make":   true,
+		"go":     true,
+		"deno":   true,
+	}
+
+	return allowed[base]
+}
+
+// runCommandWithTimeout executes a command and terminates its process group if it exceeds the timeout limit.
+func runCommandWithTimeout(cmd *exec.Cmd, timeout time.Duration) error {
+	setProcAttributes(cmd)
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		killProcessGroup(cmd)
+		return fmt.Errorf("komut zaman aşımına uğradı (limit: %v)", timeout)
+	case err := <-done:
+		return err
+	}
+}
+
+// safeJoin joins a base path and a relative path, and ensures the result stays inside base.
+func safeJoin(base, userPath string) (string, error) {
+	joined := filepath.Clean(filepath.Join(base, userPath))
+	rel, err := filepath.Rel(base, joined)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("güvenlik hatası: çıktı dizini ana dizinin dışına çıkamaz")
+	}
+	return joined, nil
+}
+
 

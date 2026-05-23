@@ -22,6 +22,10 @@ export default function SiteDetail() {
   // Git deploy
   const [gitDeploying, setGitDeploying] = useState(false)
 
+  // Password & Webhook secrets visibility states
+  const [showPassword, setShowPassword] = useState(false)
+  const [showWebhookSecret, setShowWebhookSecret] = useState(false)
+
   // Logs state
   const [logType, setLogType] = useState<'nginx_access' | 'nginx_error' | 'service' | 'ssl' | 'git_build'>('nginx_access')
   const [logs, setLogs] = useState('')
@@ -305,8 +309,15 @@ export default function SiteDetail() {
                   </div>
                   <div>
                     <dt className="text-gray-500">PocketBase Admin Şifresi</dt>
-                    <dd className="font-mono text-xs mt-1 bg-gray-50 p-1 rounded border inline-block">
-                      {site.admin_password}
+                    <dd className="font-mono text-xs mt-1 bg-gray-50 p-1 rounded border flex items-center justify-between gap-2 max-w-[200px]">
+                      <span>{showPassword ? site.admin_password : '••••••••'}</span>
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="text-xs text-blue-600 hover:text-blue-700 font-semibold"
+                      >
+                        {showPassword ? 'Gizle' : 'Göster'}
+                      </button>
                     </dd>
                   </div>
                 </>
@@ -370,8 +381,8 @@ export default function SiteDetail() {
                         onClick={() => {
                           const url = `${window.location.origin}/api/public/webhooks/github/${site.id}`;
                           navigator.clipboard.writeText(url)
-                            .then(() => alert('Webhook URL kopyalandı! GitHub repo ayarlarından Webhook ekleyip bu adresi Payload URL olarak tanımlayabilirsiniz. (Content type: application/json)'))
-                            .catch(() => alert('Kopyalama başarısız, lütfen manuel kopyalayın.'));
+                            .then(() => alert('Webhook URL kopyalandı!'))
+                            .catch(() => alert('Kopyalama başarısız.'));
                         }}
                         className="text-blue-600 hover:text-blue-700 font-semibold"
                       >
@@ -381,8 +392,39 @@ export default function SiteDetail() {
                     <dd className="font-mono text-[10px] text-gray-500 break-all select-all mt-1 p-1 bg-white border border-gray-200 rounded">
                       {`${window.location.origin}/api/public/webhooks/github/${site.id}`}
                     </dd>
-                    <p className="text-[10px] text-gray-400 mt-1">
-                      GitHub &gt; Settings &gt; Webhooks &gt; Add Webhook adımlarını takip ederek Payload URL kısmına yapıştırın. Content type'ı <strong>application/json</strong> seçin.
+                    {site.webhook_secret && (
+                      <>
+                        <dt className="text-gray-600 font-medium text-xs mt-3 flex items-center justify-between">
+                          <span>Webhook Secret</span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setShowWebhookSecret(!showWebhookSecret)}
+                              className="text-xs text-blue-600 hover:text-blue-700 font-semibold"
+                            >
+                              {showWebhookSecret ? 'Gizle' : 'Göster'}
+                            </button>
+                            <span className="text-gray-300">|</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(site.webhook_secret || '')
+                                  .then(() => alert('Webhook Secret kopyalandı!'))
+                                  .catch(() => alert('Kopyalama başarısız.'));
+                              }}
+                              className="text-blue-600 hover:text-blue-700 font-semibold"
+                            >
+                              Kopyala
+                            </button>
+                          </div>
+                        </dt>
+                        <dd className="font-mono text-[10px] text-gray-500 break-all select-all mt-1 p-1 bg-white border border-gray-200 rounded">
+                          {showWebhookSecret ? site.webhook_secret : '••••••••••••••••••••••••••••••••'}
+                        </dd>
+                      </>
+                    )}
+                    <p className="text-[10px] text-gray-400 mt-2">
+                      GitHub &gt; Settings &gt; Webhooks &gt; Add Webhook adımlarını takip ederek Payload URL kısmına yapıştırın. Content type'ı <strong>application/json</strong> seçin ve Secret kısmına yukarıdaki Webhook Secret değerini girin.
                     </p>
                   </div>
                 </>

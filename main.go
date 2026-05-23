@@ -129,6 +129,9 @@ func main() {
 		g.POST("/github/disconnect", func(e *core.RequestEvent) error {
 			return dashboard.HandleDisconnectGithubApp(e, app)
 		})
+		g.POST("/github/generate-state", func(e *core.RequestEvent) error {
+			return dashboard.HandleGenerateGithubState(e, app)
+		})
 
 		// Public Webhook (unauthenticated)
 		se.Router.POST("/api/public/webhooks/github/{id}", func(e *core.RequestEvent) error {
