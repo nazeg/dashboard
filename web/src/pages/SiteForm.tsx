@@ -143,16 +143,17 @@ export default function SiteForm() {
           method: 'PATCH',
           body,
         })
+        navigate(`/sites/${id}`)
       } else {
-        await pb.send('/api/dashboard/sites', {
+        const created = await pb.send<Site>('/api/dashboard/sites', {
           method: 'POST',
           body: {
             ...body,
             admin_email: siteType === 'pocketbase' ? adminEmail : '',
           },
         })
+        navigate(`/sites/${created.id}`)
       }
-      navigate('/sites')
     } catch (err: any) {
       setError(err?.message || 'Site kaydedilemedi')
     } finally {
